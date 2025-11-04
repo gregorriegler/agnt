@@ -1,6 +1,7 @@
 # agnt - Agent Management Script
 
 A bash script for managing named agents in tmux panes, enabling inter-agent communication.
+Inspired by Lada Kesseler's talk: https://www.youtube.com/watch?v=_LSK2bVf0Lc&t=8125
 
 ## Overview
 
