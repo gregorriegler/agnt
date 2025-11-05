@@ -18,7 +18,37 @@ set -euo pipefail
 
 # agnt - Agent management script
 
-LOCK_FILE=".agnt.lock"
+# Find lock file by traversing up parent directories
+# Only searches within $HOME, stops at $HOME
+find_lock_file() {
+    local current_dir="$PWD"
+
+    # Check if we're under $HOME
+    case "$current_dir" in
+        "$HOME"*)
+            # We're in home directory, search upward
+            while true; do
+                if [ -f "$current_dir/.agnt.lock" ]; then
+                    echo "$current_dir/.agnt.lock"
+                    return 0
+                fi
+
+                # Stop if we've reached $HOME
+                if [ "$current_dir" = "$HOME" ]; then
+                    break
+                fi
+
+                # Move up one directory
+                current_dir=$(dirname "$current_dir")
+            done
+            ;;
+    esac
+
+    # Not found or not in $HOME, return current directory path
+    echo "$PWD/.agnt.lock"
+}
+
+LOCK_FILE=$(find_lock_file)
 
 show_help() {
     cat << EOF
@@ -30,6 +60,8 @@ Commands:
     whoami                     Display the current agent name (or 'nobody' if not set)
     list                       List all agent names across all tmux panes
     send <agent> <message>     Send a message to another agent
+    purge                      Remove all panes not running 'claude' command
+    watch [interval]           Watch the agent list, refreshing every N seconds (default: 3)
     help                       Show this help message
 
 Examples:
@@ -38,6 +70,9 @@ Examples:
     agnt whoami
     agnt list
     agnt send agent2 "Hello from agent1"
+    agnt purge
+    agnt watch
+    agnt watch 5
     agnt help
 EOF
 }
@@ -51,6 +86,12 @@ get_current_pane_id() {
 pane_exists() {
     local pane_id="$1"
     tmux list-panes -a -F "#{pane_id}" | grep -q "^${pane_id}$"
+}
+
+# Helper: Get the command running in a pane
+get_pane_command() {
+    local pane_id="$1"
+    tmux display-message -p -t "$pane_id" '#{pane_current_command}' 2>/dev/null || echo ""
 }
 
 # Helper: Read lock file and return entries (format: pane_id:agent_name)
@@ -78,13 +119,13 @@ write_lock_entry() {
 # Helper: Get agent name for a pane ID
 get_agent_name_by_pane_id() {
     local pane_id="$1"
-    read_lock_file | grep "^${pane_id}:" | cut -d: -f2
+    read_lock_file | grep "^${pane_id}:" | cut -d: -f2 || true
 }
 
 # Helper: Get pane ID for an agent name
 get_pane_id_by_agent_name() {
     local agent_name="$1"
-    read_lock_file | grep ":${agent_name}$" | cut -d: -f1
+    read_lock_file | grep ":${agent_name}$" | cut -d: -f1 || true
 }
 
 # Helper: Clean stale entries (panes that no longer exist)
@@ -106,19 +147,22 @@ clean_stale_entries() {
 }
 
 cmd_start() {
-    if [ -f "$LOCK_FILE" ]; then
-        echo "Warning: This will clear all agent registrations."
+    local local_lock_file=".agnt.lock"
+
+    if [ -f "$local_lock_file" ]; then
+        echo "Warning: This will clear all agent registrations in the current directory."
         read -p "Are you sure you want to clear the lock file? (y/N): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm "$LOCK_FILE"
+            > "$local_lock_file"
             echo "Lock file cleared."
         else
             echo "Operation cancelled."
             exit 0
         fi
     else
-        echo "Lock file does not exist. Nothing to clear."
+        > "$local_lock_file"
+        echo "Created new lock file in current directory."
     fi
 }
 
@@ -176,14 +220,15 @@ cmd_list() {
         exit 1
     fi
 
-    # Clean stale entries first
-    clean_stale_entries
-
-    # Read from lock file, extract agent names, and sort alphabetically
+    # Read from lock file, extract agent names where pane is running claude
     local agents=()
     while IFS=: read -r pane_id agent_name; do
-        if [ -n "$agent_name" ]; then
-            agents+=("$agent_name")
+        if [ -n "$agent_name" ] && pane_exists "$pane_id"; then
+            local command
+            command=$(get_pane_command "$pane_id")
+            if [ "$command" = "claude" ]; then
+                agents+=("$agent_name")
+            fi
         fi
     done < <(read_lock_file)
 
@@ -192,6 +237,103 @@ cmd_list() {
     else
         printf '%s\n' "${agents[@]}" | sort
     fi
+}
+
+cmd_purge() {
+    # Check if tmux is running
+    if ! tmux list-sessions &>/dev/null; then
+        echo "Error: No tmux sessions found" >&2
+        exit 1
+    fi
+
+    if [ ! -f "$LOCK_FILE" ]; then
+        echo "No agents registered. Nothing to purge."
+        return
+    fi
+
+    local temp_file="${LOCK_FILE}.tmp"
+    > "$temp_file"
+
+    local removed=0
+    local kept=0
+
+    while IFS=: read -r pane_id agent_name; do
+        # Check if pane exists
+        if ! pane_exists "$pane_id"; then
+            echo "Removing '$agent_name' (pane $pane_id no longer exists)"
+            removed=$((removed + 1))
+            continue
+        fi
+
+        # Check what command is running in the pane
+        local command
+        command=$(get_pane_command "$pane_id")
+
+        if [ "$command" = "claude" ]; then
+            # Keep this entry
+            echo "${pane_id}:${agent_name}" >> "$temp_file"
+            kept=$((kept + 1))
+        else
+            echo "Removing '$agent_name' (pane $pane_id running '$command', not 'claude')"
+            removed=$((removed + 1))
+        fi
+    done < "$LOCK_FILE"
+
+    mv "$temp_file" "$LOCK_FILE"
+
+    echo ""
+    echo "Purge complete: $kept agent(s) kept, $removed agent(s) removed"
+}
+
+cmd_watch() {
+    local interval=3
+
+    # Parse optional interval argument
+    if [ $# -gt 0 ]; then
+        if [[ "$1" =~ ^[0-9]+$ ]]; then
+            interval="$1"
+        else
+            echo "Error: interval must be a positive number" >&2
+            exit 1
+        fi
+    fi
+
+    # Check if tmux is running
+    if ! tmux list-sessions &>/dev/null; then
+        echo "Error: No tmux sessions found" >&2
+        exit 1
+    fi
+
+    echo "Watching agents (refreshing every ${interval}s, press Ctrl+C to stop)..."
+    echo ""
+
+    while true; do
+        clear
+        echo "=== Agent List (Lock file: $LOCK_FILE) ==="
+        echo "Updated: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "Refresh interval: ${interval}s"
+        echo ""
+
+        # Read from lock file, extract agent names where pane is running claude
+        local agents=()
+        while IFS=: read -r pane_id agent_name; do
+            if [ -n "$agent_name" ] && pane_exists "$pane_id"; then
+                local command
+                command=$(get_pane_command "$pane_id")
+                if [ "$command" = "claude" ]; then
+                    agents+=("$agent_name")
+                fi
+            fi
+        done < <(read_lock_file)
+
+        if [ ${#agents[@]} -eq 0 ]; then
+            echo "No agents found"
+        else
+            printf '%s\n' "${agents[@]}" | sort
+        fi
+
+        sleep "$interval"
+    done
 }
 
 cmd_send() {
@@ -235,6 +377,14 @@ cmd_send() {
         exit 1
     fi
 
+    # Verify target pane is running claude
+    local target_command
+    target_command=$(get_pane_command "$target_pane_id")
+    if [ "$target_command" != "claude" ]; then
+        echo "Error: Agent '$target_agent' is not running claude (running '$target_command')" >&2
+        exit 1
+    fi
+
     # Send the message to the target pane
     # Clear the current prompt line (C-u), send message, then execute with Enter
     local prefixed_message="#[${sender_name}] ${message}"
@@ -270,6 +420,12 @@ main() {
             ;;
         send)
             cmd_send "$@"
+            ;;
+        purge)
+            cmd_purge "$@"
+            ;;
+        watch)
+            cmd_watch "$@"
             ;;
         help|--help|-h)
             show_help

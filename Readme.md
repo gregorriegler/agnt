@@ -30,7 +30,7 @@ export PATH="$PATH:/path/to/agents"
 ### Commands
 
 #### `agnt start`
-Clear all agent registrations (asks for confirmation).
+Clear all agent registrations in the current directory (asks for confirmation). Creates an empty `.agnt.lock` file if one doesn't exist. Always operates on the current directory's lock file.
 
 ```bash
 agnt start
@@ -52,7 +52,7 @@ agnt whoami
 ```
 
 #### `agnt list`
-List all registered agents across all tmux panes.
+List all registered agents that are currently running the `claude` command. Only shows agents that are both registered and actively running Claude.
 
 ```bash
 agnt list
@@ -62,15 +62,39 @@ agnt list
 ```
 
 #### `agnt send <agent> <message>`
-Send a message to another agent. The message will be prefixed with your agent name and sent to the target pane.
+Send a message to another agent. The message will be prefixed with your agent name and sent to the target pane. Fails with an error if the target agent is not running the `claude` command.
 
 ```bash
 agnt send bob "Hello from Alice!"
+# Output: Message sent to bob
+
+agnt send charlie "Hi there"
+# Error: Agent 'charlie' is not running claude (running 'zsh')
 ```
 
 The target agent will receive:
 ```
 #[alice] Hello from Alice!
+```
+
+#### `agnt purge`
+Remove all registered agents that are not currently running the `claude` command. This cleans up the lock file by removing stale entries and panes that have switched to other commands.
+
+```bash
+agnt purge
+# Output:
+# Removing 'alice' (pane %1 running 'zsh', not 'claude')
+# Removing 'bob' (pane %2 no longer exists)
+#
+# Purge complete: 2 agent(s) kept, 2 agent(s) removed
+```
+
+#### `agnt watch [interval]`
+Continuously monitor and display the list of active agents, refreshing every N seconds (default: 3). Press Ctrl+C to stop.
+
+```bash
+agnt watch        # refresh every 3 seconds
+agnt watch 5      # refresh every 5 seconds
 ```
 
 #### `agnt help`
@@ -200,9 +224,10 @@ Message sent to counter1
 
 ## How It Works
 
-- **Lock File**: Uses `.agnt.lock` to track pane ID to agent name mappings
+- **Lock File**: Uses `.agnt.lock` to track pane ID to agent name mappings. When reading the lock file, `agnt` searches upward through parent directories (within `$HOME`) to find the nearest lock file, allowing you to manage agents project-wide.
+- **Claude Process Verification**: The `list` and `send` commands verify that the target pane is running the `claude` command, ensuring messages only go to active Claude agents.
 - **Message Format**: Messages are prefixed with `#[sender_name]` so recipients know who sent them
-- **Stale Cleanup**: Automatically removes registrations for closed panes
+- **Automatic Cleanup**: `purge` command removes agents not running `claude`, and `list` filters out inactive agents automatically
 - **tmux Integration**: Uses `tmux send-keys` to deliver messages directly to target panes
 
 ## Advanced Usage
@@ -230,12 +255,24 @@ The script works particularly well with AI assistants like Claude that can:
 - Make sure you're running commands from within a tmux session
 
 **"Error: Agent 'name' not found"**
-- Use `agnt list` to see registered agents
-- The target agent may have been closed; try `agnt list` to verify
+- Use `agnt list` to see currently active agents
+- The target agent may have been closed or switched to a different command
+- Try `agnt watch` to monitor agents in real-time
 
-**Stale registrations**
-- Run `agnt list` which automatically cleans up closed panes
-- Or use `agnt start` to clear all registrations
+**"Error: Agent 'name' is not running claude"**
+- The agent pane exists but is not currently running the `claude` command
+- Switch to that pane and start `claude`, or use `agnt purge` to clean up inactive agents
+
+**Agent not showing in `list` but is registered**
+- `agnt list` only shows agents actively running `claude`
+- If you've exited Claude or switched to another command, the agent won't appear
+- Use `agnt purge` to clean up agents not running Claude
+- Or use `agnt start` in the original directory to clear all registrations
+
+**Multiple lock files in different directories**
+- `agnt` searches upward from the current directory to find `.agnt.lock` (stopping at `$HOME`)
+- This allows project-wide agent management
+- Use `agnt start` in a specific directory to create a new lock file scope there
 
 ## License
 
