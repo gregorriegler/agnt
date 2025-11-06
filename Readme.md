@@ -43,6 +43,12 @@ Register the current tmux pane as an agent with the specified name.
 agnt rename alice
 ```
 
+**Agent Name Restrictions:**
+- Cannot be empty
+- Cannot contain `:` (colon) - used as delimiter in lock file format
+- Cannot contain newlines
+- Most other characters are supported, including spaces, `#`, `|`, `/`, `$`, etc.
+
 #### `agnt whoami`
 Display the current agent name (or 'nobody' if not registered).
 
@@ -263,6 +269,10 @@ The script works particularly well with AI assistants like Claude that can:
 - The agent pane exists but is not currently running the `claude` command
 - Switch to that pane and start `claude`, or use `agnt purge` to clean up inactive agents
 
+**"Error: agent name cannot contain ':' character"**
+- Colons are used as delimiters in the lock file format and cannot be used in agent names
+- Choose a different name without colons
+
 **Agent not showing in `list` but is registered**
 - `agnt list` only shows agents actively running `claude`
 - If you've exited Claude or switched to another command, the agent won't appear
@@ -273,6 +283,11 @@ The script works particularly well with AI assistants like Claude that can:
 - `agnt` searches upward from the current directory to find `.agnt.lock` (stopping at `$HOME`)
 - This allows project-wide agent management
 - Use `agnt start` in a specific directory to create a new lock file scope there
+
+**Wrong sender name appearing in messages**
+- This issue has been fixed in recent versions
+- The script now uses fixed-string matching to prevent special characters from being misinterpreted
+- Duplicate entries in the lock file are handled by taking only the first match
 
 ## License
 
