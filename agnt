@@ -128,6 +128,12 @@ get_pane_id_by_agent_name() {
     read_lock_file | grep -F ":${agent_name}" | head -n1 | cut -d: -f1 || true
 }
 
+# Helper: Check if a command is a supported agent command
+is_agent_command() {
+    local command="$1"
+    [ "$command" = "claude" ] || [ "$command" = "opencode" ]
+}
+
 # Helper: Clean stale entries (panes that no longer exist)
 clean_stale_entries() {
     if [ ! -f "$LOCK_FILE" ]; then
@@ -236,13 +242,13 @@ cmd_list() {
         exit 1
     fi
 
-    # Read from lock file, extract agent names where pane is running claude
+    # Read from lock file, extract agent names where pane is running claude or opencode
     local agents=()
     while IFS=: read -r pane_id agent_name; do
         if [ -n "$agent_name" ] && pane_exists "$pane_id"; then
             local command
             command=$(get_pane_command "$pane_id")
-            if [ "$command" = "claude" ]; then
+            if is_agent_command "$command"; then
                 agents+=("$agent_name")
             fi
         fi
@@ -285,12 +291,12 @@ cmd_purge() {
         local command
         command=$(get_pane_command "$pane_id")
 
-        if [ "$command" = "claude" ]; then
+        if is_agent_command "$command"; then
             # Keep this entry
             echo "${pane_id}:${agent_name}" >> "$temp_file"
             kept=$((kept + 1))
         else
-            echo "Removing '$agent_name' (pane $pane_id running '$command', not 'claude')"
+            echo "Removing '$agent_name' (pane $pane_id running '$command', not an agent command)"
             removed=$((removed + 1))
         fi
     done < "$LOCK_FILE"
@@ -330,13 +336,13 @@ cmd_watch() {
         echo "Refresh interval: ${interval}s"
         echo ""
 
-        # Read from lock file, extract agent names where pane is running claude
+        # Read from lock file, extract agent names where pane is running claude or opencode
         local agents=()
         while IFS=: read -r pane_id agent_name; do
             if [ -n "$agent_name" ] && pane_exists "$pane_id"; then
                 local command
                 command=$(get_pane_command "$pane_id")
-                if [ "$command" = "claude" ]; then
+                if is_agent_command "$command"; then
                     agents+=("$agent_name")
                 fi
             fi
@@ -393,11 +399,11 @@ cmd_send() {
         exit 1
     fi
 
-    # Verify target pane is running claude
+    # Verify target pane is running an agent command
     local target_command
     target_command=$(get_pane_command "$target_pane_id")
-    if [ "$target_command" != "claude" ]; then
-        echo "Error: Agent '$target_agent' is not running claude (running '$target_command')" >&2
+    if ! is_agent_command "$target_command"; then
+        echo "Error: Agent '$target_agent' is not running an agent command (running '$target_command')" >&2
         exit 1
     fi
 
